@@ -1,0 +1,98 @@
+name: Design Doc Pipeline
+
+# 設計ドキュメント(docs/design/**)のPRがマージされたら、
+# Claude Code Action (anthropics/claude-code-action@v1) が実装PRを作成する(OVERVIEW.md参照)。
+# 承認ゲートは docs/design/** への必須レビュー(ブランチ保護)であり、
+# ラベルではなく「マージされたこと」自体がトリガーになる。
+#
+# design doc PR → 実装PR → モデル更新PR、の単方向3本構成(OVERVIEW.md参照)。
+# 実装PRには `agent-implementation` ラベルを付け、そのマージが
+# model-update-pipeline.yml のトリガーになる。
+#
+# 個人利用テンプレートのため、手動テスト仕様書・リリース手順書の生成は含めていない。
+# 会社利用など、そうした成果物が必要な文脈では別途ステップを追加すること。
+#
+# 前提: SETUP.mdに従い、Claude GitHub Appのインストールと
+#       ANTHROPIC_API_KEY のSecrets登録、docs/design/**への必須レビュー設定を済ませておくこと
+
+on:
+  pull_request:
+    types: [closed]
+    paths:
+      - "docs/design/**"
+
+concurrency:
+  group: design-doc-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  implement:
+    # マージされたときだけ走る(マージされていないPRクローズは無視)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Implement from merged design doc
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            直前にマージされた設計ドキュメント(docs/design/**、PR #${{ github.event.pull_request.number }})の
+            「受け入れ条件」を実装の起点としてください。
+            AGENTS.md と docs/domain-model.md の内容にも従い、実装してください。
+            「やらないこと」に明記された範囲は実装しないでください。
+            実装内容を新しいブランチにコミットし、PRを作成してください。
+            作成したPRには `agent-implementation` ラベルを付けてください
+            (ラベルが存在しない場合は作成してから付けてください)。
+          claude_args: |
+            --max-turns 30
+            --max-budget-usd 5
+
+  review-and-verify:
+    needs: implement
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run reviewer subagent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            .claude/agents/reviewer.md のreviewer subagentとして、
+            このPRのdiffだけをレビューしてください。
+            作成時の意図や経緯の説明は与えられていない前提で、成果物単体として評価してください。
+            対応する設計ドキュメント(docs/design/**)の「受け入れ条件」を検証基準にしてください。
+          claude_args: |
+            --max-turns 15
+            --max-budget-usd 2
+
+      - name: Run verifier subagent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            .claude/agents/verifier.md のverifier subagentとして、
+            対応する設計ドキュメント(docs/design/**)の「受け入れ条件」を
+            チェックリストとして、このPRの実装が満たしているかを1項目ずつ検証してください。
+            あわせて docs/domain-model.md との整合性も確認してください。
+          claude_args: |
+            --max-turns 15
+            --max-budget-usd 2
+
+  # マージ判断:最初は人が行う。
+  # このPRがマージされると model-update-pipeline.yml が起動し、
+  # ドメインモデル更新PRが別途作られる(OVERVIEW.md参照)。
+  # 自動マージのリスクベース分岐は運用ログが溜まってから段階的に導入する。

@@ -1,0 +1,47 @@
+name: Model Update Pipeline
+
+# design-doc-pipeline.yml が作った実装PR(`agent-implementation`ラベル付き)が
+# マージされたら、実装内容を分析してドメインモデル更新PRを作成する。
+# design doc PR → 実装PR → モデル更新PR、という単方向3本構成の最後の1本(OVERVIEW.md参照)。
+#
+# ファイルへの直接反映はせず、必ず新しいPRとして提案する。
+# docs/domain-model.md への必須レビュー(SETUP.md参照)が、このPRの承認ゲートになる。
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: model-update-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  propose-model-update:
+    if: >
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'agent-implementation')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Propose domain model update PR
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            直前にマージされた実装PR #${{ github.event.pull_request.number }} の
+            diffを分析してください。実装を通して分かった知見
+            (新しく登場した概念、当初のdocs/domain-model.mdと異なっていた点、
+            追加すべきユビキタス言語など)があれば、docs/domain-model.md を更新し、
+            新しいブランチにコミットしてPRを作成してください。
+            PRの説明には、元の実装PR番号と、なぜその更新が必要かを書いてください。
+            知見が特になければ、PRは作成せず、その旨だけ報告してください。
+          claude_args: |
+            --max-turns 15
+            --max-budget-usd 2
